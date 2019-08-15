@@ -1,0 +1,13 @@
+noise,True
+aug_num,100
+n1,100
+num_epochs,400
+batch_size,32
+gamma,0.001
+loss,0.32172784
+accuracy,0.6875
+epoch,394
+pred,[[31.255821]]
+label,[[30.]]
+traintime,142.91583799999452
+average_testtime,0.0009009799999998635
