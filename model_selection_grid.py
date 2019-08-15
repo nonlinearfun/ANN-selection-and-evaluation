@@ -43,8 +43,15 @@ import numpy as np
 import contextlib
 import os
 import matplotlib.pyplot as plt
-import neuralnetwork_tf_cpu
-from neuralnetwork_tf_cpu import *
+import neuralnetwork_tf2
+from neuralnetwork_tf2 import *
+import time
+import multiprocessing
+from multiprocessing import Process
+from sklearn.model_selection import ParameterGrid
+
+np.random.seed(0)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 @contextlib.contextmanager
 def temp_seed(seed):
@@ -75,15 +82,18 @@ def fit(data, n1, lr, bs, bayes_scope, model_num, args):
     loss = []
     accuracy = []
     test_list = []
+
     # perform cross validation
-    with temp_seed(0):
+    with temp_seed(1234):
         for counter in range(len(data.y_train_list)):
             bayes_scope += 1
             with tf.Session() as sess:
                 x_train, y_train, x_test, y_test = data.return_cross_val(counter)
+                # add noise to inputs
                 if args.noise:
-                    x_train, y_train = data.training_augment(y_train, args.n_aug)
-                low_loss, low_accuracy = run(sess, x_train, y_train, x_test, y_test, n1, lr, bs, n_epochs, str(bayes_scope), counter, model_num)
+                    x_train, y_train = data.add_noise(x_train, y_train, args.n_aug)
+                    x_test, y_test = data.add_noise(x_test, y_test, 1)
+                low_loss, low_accuracy = run(sess, x_train, y_train, x_test, y_test, n1, lr, bs, n_epochs, str(bayes_scope), model_num)
                 loss.append(low_loss)
                 accuracy.append(low_accuracy)
                 sess.close()
@@ -100,17 +110,21 @@ def fit(data, n1, lr, bs, bayes_scope, model_num, args):
 
     return loss, accuracy, loss_mean, loss_std, accuracy_mean, accuracy_std, test_list
 
-def model_selection(data, h1_v, lr_v, bs_v, args):
+def model_selection(data, grid, args, work_id, model_num):
     """ Determine the best hyperparameter settings via a grid search-like procedure
         [data]                  dataset
-        [n1_v],[lr_v],[bs_v]    hyperparameter array (see below)
+        [grid]                  hyperparameter grid
         [bayes_scope]           help create new variable names in tf graph
+        [work_id]               process number
         [model_num]             track model number
         [args]                  arguments from parser
     """
     low_score = 1000
+    low_model_num = 0
+    low_n1 = 0
+    low_bs = 0
+    low_lr = 0
     bayes_scope = 0
-    model_num = 0
 
     # create folder if folder does not exist!
     case_str = args.csv
@@ -121,42 +135,32 @@ def model_selection(data, h1_v, lr_v, bs_v, args):
         os.makedirs('modelselection'+case_str)
 
     # open csv file to store information
-    csv_filename = 'modelselection'+case_str+'/hyperpandlosses'+case_str+'.csv'
+    csv_filename = 'modelselection'+case_str+'/thread_id'+work_id+'.csv'
     with open(csv_filename, 'a') as csv_file:
         writer = csv.writer(csv_file)
 
         # iterate through all combinations of hyperparameter settings
-        for a in range(len(h1_v)):
-            n1 = h1_v[a]
-            for b in range(len(lr_v)):
-                 lr = lr_v[b]
-                 for c in range(len(bs_v)):
-                     bs = bs_v[c]
-                     loss, accuracy, loss_mean, loss_std, accuracy_mean, accuracy_std, test_list = fit(data, n1, lr, bs, bayes_scope, model_num, args)
-                     model_num += 1
+        for params in grid:
+            model_num += 1
+            loss, accuracy, loss_mean, loss_std, accuracy_mean, accuracy_std, test_list = fit(data, params['n1'], params['lr'], params['bs'], bayes_scope, model_num, args)
 
-                     # write all hyperparameters and scores into csv
-                     writer.writerow(['model_num', model_num])
-                     writer.writerow(['n1', n1])
-                     writer.writerow(['lr', lr])
-                     writer.writerow(['bs', bs])
-                     writer.writerow(['loss', loss])
-                     writer.writerow(['loss_mean', loss_mean])
-                     writer.writerow(['loss_std', loss_std])
-                     writer.writerow(['accuracy', accuracy])
-                     writer.writerow(['accuracy_mean', accuracy_mean])
-                     writer.writerow(['accuracy_std', accuracy_std])
-                     writer.writerow(['test_list', test_list])
+            # write all hyperparameters and scores into csv
+            writer.writerow(['model_num', model_num])
+            writer.writerow(['n1', params['n1']])
+            writer.writerow(['lr', params['lr']])
+            writer.writerow(['bs', params['bs']])
+            writer.writerow(['loss', loss])
+            writer.writerow(['loss_mean', loss_mean])
+            writer.writerow(['loss_std', loss_std])
+            writer.writerow(['accuracy', accuracy])
+            writer.writerow(['accuracy_mean', accuracy_mean])
+            writer.writerow(['accuracy_std', accuracy_std])
+            writer.writerow(['test_list', test_list])
 
-                     # if better score, keep track of hyperparameters
-                     if loss_mean < low_score:
-                         low_n1 = n1
-                         low_lr = lr
-                         low_bs = bs
-                         low_model_num = model_num
-                         low_score = loss_mean
-        writer.writerow(['low_model_num', low_model_num])
-    print('best hyperparameters are n1=',low_n1,', lr=',low_lr,', bs=',low_bs, ': model #',low_model_num)
+def worker(data, grid, args, work_id, model_num):
+    """ Have process perform search instances """
+    model_selection(data, grid, args, work_id, model_num)
+    return
 
 if __name__ == '__main__':
     # define parser arguments
@@ -164,19 +168,35 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--csv', type=str, default='case1', help='csv filename without the .csv')
     parser.add_argument('--noise', action='store_true', help='adds noise')
-    parser.add_argument('--n_aug', type=int, default=200, help='number to augment per training example')
-    parser.add_argument('--n_epochs', type=int, default=300, help='number of epochs')
+    parser.add_argument('--n_aug', type=int, default=100, help='number to augment per training example')
+    parser.add_argument('--n_epochs', type=int, default=1000, help='number of epochs')
     args = parser.parse_args()
 
-    # combinations of hyperparameters to select
+    # specify and construct grid for grid search
     if args.noise:
-        h1_v = np.arange(20,51,10)                      # num hidden neurons
-        lr_v = np.array([1e-4,5e-4,5e-5])               # learning rate
-        bs_v = np.array([8,16,32,64])                   # batch size
+        n1_v = np.arange(70,120,5)                       # num hidden neurons
+        lr_v = np.array([1e-3,5e-4,1e-4])                # learning rate
+        bs_v = np.array([32,64])                         # batch size
     else:
-        h1_v = np.arange(20,61,5)                       # num hidden neurons
-        lr_v = np.array([1e-4,5e-4,5e-5,1e-5])          # learning rate
-        bs_v = np.arange(4,9,2)                         # batch size
+        n1_v = np.arange(180,205,5)                      # num hidden neurons
+        lr_v = np.array([1e-3,5e-4,1e-4])                # learning rate
+        bs_v = np.array([4,8,16])                        # batch size
 
-    data = dataset(args)                            # initialize dataset class here, so that CV folds kept same across models
-    model_selection(data, h1_v, lr_v, bs_v, args)   # perform model selection
+    combo_array = {'n1': n1_v, 'lr': lr_v, 'bs': bs_v}
+    grid = ParameterGrid(combo_array)
+    data = dataset(args)
+
+    # use multiprocessing module to run grid search in parallel with independent processes
+    num_model = len(list(grid))
+    print('NUMBER OF TOTAL RUNS:', num_model)
+    num_cpu = multiprocessing.cpu_count()
+    percpu = int(np.ceil(num_model/num_cpu))
+
+    for i in range(num_cpu):
+        print(i)
+        if i == num_cpu - 1:
+            p = multiprocessing.Process(target=worker, args=(data, list(grid)[i*percpu:], args, str(i), i*percpu))
+        else:
+            p = multiprocessing.Process(target=worker, args=(data, list(grid)[i*percpu:i*percpu+percpu], args, str(i), i*percpu))
+        p.start()
+    p.join()
